@@ -1,62 +1,84 @@
 library(tidyverse)
+#library(RCurl)
+#library(xml2)
+#library(rvest)
 #saveRDS(divi_data, "diviregister.Rds")
 #divi_data <- readRDS("diviregister.Rds")
-
+base_url <- "https://www.divi.de"
+base_path <- "/divi-intensivregister-tagesreport-archiv-csv"
 ### get urls
-base_url <- "https://www.divi.de/divi-intensivregister-tagesreport-archiv-csv"
-divi_data <- tibble(CSVURL = character(0))
-dummy <- tibble(CSVURL = character(0))
+divi_csvurls <- tibble(CSVURL = character(0))
 i <- 0
-
-while(i == 0 || nrow(dummy) != 0){
-  url = url(paste0(base_url, "?layout=table&start=", i), "rb")
+repeat{
+  url = url(paste0(base_url, base_path, "?layout=table&start=", i), "rb")
   page_content <- xml2::read_html(url)
   close(url)
-  dummy <- as_tibble(
-    rvest::html_attr(rvest::html_nodes(page_content, "a"), "href")
-  ) %>% 
-    rename(CSVURL = value) %>%
-    filter(
-      str_starts(CSVURL, "/divi-intensivregister-tagesreport-archiv-csv/viewdocument/")
-    )
-  if (nrow(dummy) == 1){
-    if (dummy[1,1] == "/divi-intensivregister-tagesreport-archiv-csv/viewdocument/3974/divi-intensivregister-2020-04-24-09-15"){
-      dummy <- tibble(CSVURL = character(0))
-    }
-  }
-  divi_data <- rbind(divi_data, dummy)
+  count_urls <- nrow(divi_csvurls)
+  divi_csvurls <- divi_csvurls %>%
+    bind_rows(
+      as_tibble(
+        rvest::html_attr(rvest::html_nodes(page_content, "a"), "href")
+      ) %>% 
+      filter(
+        str_starts(value, paste0(base_path, "/viewdocument/"))
+      ) 
+    ) %>%
+    distinct(value)
+  ### break if no new urls
+  if (count_urls == nrow(divi_csvurls)){break}
   i <- i + 20
 }
-rm(i, url, dummy, page_content)
+rm(i, url, page_content, count_urls)
 
-
-divi_data <- divi_data %>%
+divi_csvurls <- divi_csvurls %>%
   mutate(
-    Datum = as.Date(substr(divi_data$CSVURL, 87,96)),
-    CSVURL = paste0("https://www.divi.de", CSVURL)
+    value.date = as.Date(substr(value, 87, 96)),
+    value.time = substr(value, 98, 102)
+  ) %>%
+  arrange(
+    desc(value.date), desc(value.time)
+  ) %>%
+  distinct(
+    value.date, .keep_all = TRUE
   )
 
-csvdata <- tibble()
-for (i in 1:nrow(divi_data)){
-  dummy <- read_csv(RCurl::getURL(divi_data[i,]$CSVURL))
-  dummy$CSVDatum <- divi_data[i,]$Datum
-  csvdata <- bind_rows(
-    csvdata,
-    dummy
+### get csv data
+divi_data <- tibble()
+pb = txtProgressBar(min = 1, max = nrow(divi_csvurls), style = 3) 
+for (i in 1:nrow(divi_csvurls)){
+  setTxtProgressBar(pb, i)
+  dummy <- tryCatch(
+    {read_csv(RCurl::getURL(paste0(base_url, divi_csvurls[i,]$value)))},
+    error = function(e) {tibble()},
+    warning = function(w) {tibble()}
   )
+  if (nrow(dummy) > 0){
+    dummy$CSVDate <- divi_csvurls[i,]$value.date
+    divi_data <- divi_data %>%
+      bind_rows(
+        dummy
+      )
+  }
 }
-rm(i, dummy)
+close(pb)
+rm(i, dummy, pb)
 
-csvdata %>%
+### simple plot
+divi_data %>%
   group_by(
-    CSVDatum
+    CSVDate
   ) %>%
   summarise(
-    bedfree = sum(betten_frei),
-    bedbelegt = sum(betten_belegt)
+    bed.free = sum(betten_frei),
+    bed.occupied = sum(betten_belegt),
+    bed.sum = bed.free + bed.occupied
+  ) %>%
+  pivot_longer(
+    cols = starts_with("bed."),
+    names_to = "BedStatus",
+    names_prefix = "bed."
   ) %>%
   ggplot(
-    aes (x=CSVDatum,)
+    aes (x = CSVDate, y = value, colour = BedStatus)
   ) +
-  geom_point(aes(y=bedfree), colour = "green")+
-  geom_point(aes(y=bedbelegt), colour ="red")
+  geom_line()
